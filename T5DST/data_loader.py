@@ -10,7 +10,12 @@ import random
 from functools import partial
 from utils.fix_label import fix_general_label_error
 from collections import OrderedDict
-EXPERIMENT_DOMAINS = ["hotel", "train", "restaurant", "attraction", "taxi"]
+from itertools import combinations
+import random
+
+
+# EXPERIMENT_DOMAINS = ["hotel", "train", "restaurant", "attraction", "taxi"] 
+EXPERIMENT_DOMAINS = ["景点", "餐馆","酒店","出租","地铁"]
 
 random.seed(577)
 HISTORY_MAX_LEN = 450
@@ -84,14 +89,14 @@ def read_data(args, path_name, SLOTS, tokenizer, description, dataset=None):
                 slot_temp = SLOTS
                 if dataset == "train" or dataset == "dev":
                     if args["except_domain"] != "none":
-                        slot_temp = [k for k in SLOTS if args["except_domain"] not in k]
+                        slot_temp = [k for k in SLOTS if args["except_domain"]+"-" not in k]
                         slot_values = OrderedDict([(k, v) for k, v in slot_values.items() if args["except_domain"] not in k])
                     elif args["only_domain"] != "none":
                         slot_temp = [k for k in SLOTS if args["only_domain"] in k]
                         slot_values = OrderedDict([(k, v) for k, v in slot_values.items() if args["only_domain"] in k])
                 else:
                     if args["except_domain"] != "none":
-                        slot_temp = [k for k in SLOTS if args["except_domain"] in k]
+                        slot_temp = [k for k in SLOTS if args["except_domain"]+"-" in k]
                         slot_values = OrderedDict([(k, v) for k, v in slot_values.items() if args["except_domain"] in k])
                     elif args["only_domain"] != "none":
                         slot_temp = [k for k in SLOTS if args["only_domain"] in k]
@@ -143,21 +148,21 @@ def read_data(args, path_name, SLOTS, tokenizer, description, dataset=None):
 
                         if args["slot_lang"]=="human":
                             slot_lang = description[slot]["description_human"]
-                            input_text = dialog_history + f" {tokenizer.sep_token} {slot_lang}?"
+                            input_text = f" {tokenizer.sep_token} {slot_lang}?"
                         elif args["slot_lang"]=="naive":
                             slot_lang = description[slot]["naive"]
-                            input_text = dialog_history + f" {tokenizer.sep_token} {slot_lang}?"
+                            input_text = f" {tokenizer.sep_token} {slot_lang}?"
                         elif args["slot_lang"]=="value":
                             slot_lang = description[slot]["naive"]
-                            input_text = dialog_history + f" {tokenizer.sep_token} {slot_lang}"
+                            input_text = f" {tokenizer.sep_token} {slot_lang}"
                         elif args["slot_lang"]=="question":
                             slot_lang = description[slot]["question"]
-                            input_text = dialog_history + f" {tokenizer.sep_token} {slot_lang}"
+                            input_text = f" {tokenizer.sep_token} {slot_lang}"
                         elif args["slot_lang"]=="slottype":
                             slot_lang = description[slot]["slottype"]
-                            input_text = dialog_history + f" {tokenizer.sep_token} {slot_lang}?"
+                            input_text =  f" {tokenizer.sep_token} {slot_lang}?"
                         else:
-                            input_text = dialog_history + f" {tokenizer.sep_token} {slot}"
+                            input_text = f" {tokenizer.sep_token} {slot}"
 
                         data_detail = {
                             "ID":dial_dict["dial_id"],
@@ -169,20 +174,103 @@ def read_data(args, path_name, SLOTS, tokenizer, description, dataset=None):
                             "output_text":output_text,
                             "slot_text":slot_text,
                             "value_text":value_text,
-                            "value_list":description[slot]["values"]
+                            # "value_list":description[slot]["values"]
                             }
                         data.append(data_detail)
     # print(len(data))
+    print("======origin data=======")
     for idx in range(10):
         print(data[idx])
-    print("domain_counter", domain_counter)
+        print("domain_counter", domain_counter)
+    
+    
+    
+    
+    newdata = []
+    #build datadict
+    print("building datadict...")
+    datadict = {}
+    # if path_name == 'data/train_dials.json':
+    for i, each in enumerate(data):
+        if each["ID"] not in datadict.keys():
+            datadict.update({each["ID"]:{}})
+        if each["turn_id"] not in datadict[each["ID"]].keys():
+            datadict[each["ID"]].update({each["turn_id"]:[]})
+        datadict[each["ID"]][each["turn_id"]].append(each)
+    
+    #sample and concat
+    print("sample and concat...")
+    # for slot_num in [1,2,3]:
+    for slot_num in [1]:
+        count = 0
+        for dial in datadict.keys():
+            for turn in datadict[dial].keys():
+                count += 1
+                if count % 5000 == 0:
+                    print(str(count)+"/"+str(len(data)))
+                all_slots = datadict[dial][turn]
+                all_comb = list(combinations(all_slots,slot_num))
+                try:
+                    select = random.sample(all_comb, len(all_slots))
+                except:
+                    select = random.sample(all_comb, 1)   #attraction domain has 3 slots, only 1 combination
+                for comb in select:
+                    newdata.append(concat_slot(list(comb)))
+                    
+    # print("saving data...")
+    # with open("{}_data_slotnum=1,2,3.json".format(path_name[5:10]),"w") as f:
+    #     f.write(json.dumps(newdata))
+    # f.close()
+    # print("finish saving training data")
+    
+    print("length of original data: ")
+    print(len(data))
+    print("length of newdata: ")
+    print(len(newdata))
+    # print(newdata)
+    data = newdata
+    
+    
+    print("======processed data=======")
+    for idx in range(10):
+        print(data[idx])
+        print("domain_counter", domain_counter)
+    
+    
     return data, slot_temp
 
 
+def concat_slot(data):
+        newdata = data[0].copy()
+        newdata["intput_text"] = "<extra_id_1>" + newdata["intput_text"]
+        newdata["output_text"] = "<extra_id_1>" + newdata["output_text"]
+        newdata["slot_num"] = 1
+        for i, each in enumerate(data[1:]):
+            newdata["slot_num"] += 1
+            newdata["intput_text"] += "<extra_id_{}>".format(newdata["slot_num"]) + each["intput_text"]
+            newdata["output_text"] += "<extra_id_{}>".format(newdata["slot_num"]) + each["output_text"]
+            
 
-def get_slot_information(ontology):
+        newdata["intput_text"]  = newdata["intput_text"].replace("[sep]","") + "[sep]" + newdata["dialog_history"].replace("[sep]","")
+        newdata["output_text"] = newdata["output_text"].replace("[eos]","")
+        
+        
+        #add special tokens
+        newdata["output_text"] = newdata["output_text"] + "[eos]"
+        #改为中文字符
+        newdata["intput_text"] = newdata["intput_text"].replace("none","无").replace("System","系统").replace("User","用户")
+        newdata["output_text"] = newdata["output_text"].replace("none","无").replace("System","系统").replace("User","用户")
+        
+        
+        return newdata
+    
+    
+def get_slot_information(args,ontology):
     ontology_domains = dict([(k, v) for k, v in ontology.items() if k.split("-")[0] in EXPERIMENT_DOMAINS])
-    SLOTS = [k.replace(" ","").lower() if ("book" not in k) else k.lower() for k in ontology_domains.keys()]
+    if args["dataset"] == "multiwoz":
+        SLOTS = [k.replace(" ","").lower() if ("book" not in k) else k.lower() for k in ontology_domains.keys()]
+    elif args["dataset"] == "crosswoz":
+        SLOTS = [k.replace(" ","") if ("book" not in k) else k for k in ontology_domains.keys()]
 
     return SLOTS
 
@@ -194,6 +282,7 @@ def gpt_collate_fn(data,tokenizer):
 
     output_batch = tokenizer(batch_data["output_text"], padding=True, return_tensors="pt", add_special_tokens=False, return_attention_mask=False, truncation=True, max_length=1000)
     batch_data["input_ids"] = output_batch['input_ids']
+    
     return batch_data
 
 
@@ -209,22 +298,37 @@ def collate_fn(data, tokenizer):
     # replace the padding id to -100 for cross-entropy
     output_batch['input_ids'].masked_fill_(output_batch['input_ids']==tokenizer.pad_token_id, -100)
     batch_data["decoder_output"] = output_batch['input_ids']
-
+    
     return batch_data
 
 
 def prepare_data(args, tokenizer):
-    path_train = 'data/train_dials.json'
-    path_dev = 'data/dev_dials.json'
-    path_test = 'data/test_dials.json'
+    
+    if  args["dataset"] == "multiwoz":
+        path_train = 'data/train_dials.json'
+        path_dev = 'data/dev_dials.json'
+        path_test = 'data/test_dials.json'
 
-    ontology = json.load(open("data/multi-woz/MULTIWOZ2 2/ontology.json", 'r'))
-    ALL_SLOTS = get_slot_information(ontology)
-    description = json.load(open("utils/slot_description.json", 'r'))
+        ontology = json.load(open("data/multi-woz/MULTIWOZ2 2/ontology.json", 'r'))
+        ALL_SLOTS = get_slot_information(args,ontology)
+        description = json.load(open("utils/slot_description.json", 'r'))
+        
+    elif args["dataset"] == "crosswoz":
+        path_train = 'data_crosswoz/train_dials.json'
+        path_dev = 'data_crosswoz/dev_dials.json'
+        path_test = 'data_crosswoz/test_dials.json'
+
+        ontology = json.load(open("data_crosswoz/ontology.json", 'r'))
+        ALL_SLOTS = get_slot_information(args,ontology)
+        description = json.load(open("data_crosswoz/slot_description.json", 'r'))
+        
 
     data_train, _ = read_data(args, path_train, ALL_SLOTS, tokenizer, description, "train")
     data_dev, _ = read_data(args, path_dev, ALL_SLOTS, tokenizer, description, "dev")
     data_test, ALL_SLOTS = read_data(args, path_test, ALL_SLOTS, tokenizer, description, "test")
+    
+    #MODIFIED:REDUCE TEST DATASET
+    data_test = data_test[:args["testset_size"]]
 
 
     train_dataset = DSTDataset(data_train, args)

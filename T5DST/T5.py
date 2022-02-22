@@ -14,6 +14,8 @@ from tqdm import tqdm
 from copy import deepcopy
 import numpy as np
 from collections import Counter
+from tokenizer import T5PegasusTokenizer
+from transformers.models.mt5.modeling_mt5 import MT5ForConditionalGeneration
 
 # def consistency_cross_entropy(lm_logits1, lm_logits2, threshold=0.4):
 #     logsoftmax = torch.nn.LogSoftmax(dim=1)
@@ -53,15 +55,21 @@ class DST_Seq2Seq(pl.LightningModule):
         self.tokenizer = tokenizer
         self.model = model
         self.lr = args["lr"]
+        self.trainset_size = args["trainset_size"]
+        self.batch_slot_num = []
+        self.batch_not_none_slot_num = []
+        self.batch_encoder_input_len = []
 
 
     def training_step(self, batch, batch_idx):
         self.model.train()
-        (loss), *_ = self.model(input_ids=batch["encoder_input"],
+        (loss) = self.model(input_ids=batch["encoder_input"],
                             attention_mask=batch["attention_mask"],
-                            lm_labels=batch["decoder_output"]
-                            )
-
+                            # lm_labels=batch["decoder_output"],
+                                labels=batch["decoder_output"]
+                            ).loss
+        # print("====train loss====")
+        # print(loss)
         # result = pl.TrainResult(loss)
         # result.log('train_loss', loss, on_epoch=True)
         return {'loss': loss, 'log': {'train_loss': loss}}
@@ -69,15 +77,33 @@ class DST_Seq2Seq(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         self.model.eval()
-        (loss), *_ = self.model(input_ids=batch["encoder_input"],
+        (loss)= self.model(input_ids=batch["encoder_input"],
                             attention_mask=batch["attention_mask"],
-                            lm_labels=batch["decoder_output"]
-                            )
-
+                            # lm_labels=batch["decoder_output"],
+                                labels=batch["decoder_output"]
+                            ).loss
+        
 
         return {'val_loss': loss, 'log': {'val_loss': loss}}
         # return result
 
+    def validation_step_end(self,batch_parts):
+        # print(batch_parts)
+        losses = batch_parts["val_loss"]
+#         try:
+#             GPU_num = len(losses)
+#         except:
+#             print(losses)
+#             GPU_num = 4
+            
+#         average_loss = 0
+#         for loss in losses:
+#             average_loss += loss
+#         average_loss = average_loss / GPU_num
+        average_loss = losses
+        return {"val_loss":average_loss, "log":{"val_loss":average_loss}}
+    
+    
     def validation_epoch_end(self, outputs):
         val_loss_mean = sum([o['val_loss'] for o in outputs]) / len(outputs)
         # show val_loss in progress bar but only log val_loss
@@ -89,21 +115,26 @@ class DST_Seq2Seq(pl.LightningModule):
         return AdamW(self.parameters(), lr=self.lr, correct_bias=True)
 
 
-
+        #early stopping inside epoch
+    def on_train_batch_start(self,batch, batch_idx, unused=0):
+        if (self.trainset_size != None) and (batch_idx >= self.trainset_size):
+            return -1
+        
+        
 def train(args, *more):
     args = vars(args)
-    args["model_name"] = args["model_checkpoint"]+args["model_name"]+"_except_domain_"+args["except_domain"]+ "_slotlang_" +str(args["slot_lang"]) + "_lr_" +str(args["lr"]) + "_epoch_" + str(args["n_epochs"]) + "_seed_" + str(args["seed"])
+    args["model_name"] = args["comment"]+args["model_checkpoint"]+args["model_name"]+"_except_domain_"+args["except_domain"]+ "_slotlang_" +str(args["slot_lang"]) + "_lr_" +str(args["lr"]) + "_epoch_" + str(args["n_epochs"]) + "_seed_" + str(args["seed"])
     # train!
     seed_everything(args["seed"])
 
 
-    if "t5" in args["model_name"]:
+    if "chinese" in args["model_name"]:
+        model = MT5ForConditionalGeneration.from_pretrained(args["model_checkpoint"])
+        tokenizer = T5PegasusTokenizer.from_pretrained(args["model_checkpoint"], bos_token="[bos]", eos_token="[eos]", sep_token="[sep]")
+        model.resize_token_embeddings(new_num_tokens=len(tokenizer))
+    elif "t5" in args["model_name"]:
         model = T5ForConditionalGeneration.from_pretrained(args["model_checkpoint"])
         tokenizer = T5Tokenizer.from_pretrained(args["model_checkpoint"], bos_token="[bos]", eos_token="[eos]", sep_token="[sep]")
-        model.resize_token_embeddings(new_num_tokens=len(tokenizer))
-    elif "bart" in args["model_name"]:
-        model = BartForConditionalGeneration.from_pretrained(args["model_checkpoint"])
-        tokenizer = BartTokenizer.from_pretrained(args["model_checkpoint"], bos_token="[bos]", eos_token="[eos]", sep_token="[sep]")
         model.resize_token_embeddings(new_num_tokens=len(tokenizer))
 
     task = DST_Seq2Seq(args, tokenizer, model)
@@ -120,12 +151,14 @@ def train(args, *more):
                     accumulate_grad_batches=args["gradient_accumulation_steps"],
                     gradient_clip_val=args["max_norm"],
                     max_epochs=args["n_epochs"],
-                    callbacks=[pl.callbacks.EarlyStopping(monitor='val_loss',min_delta=0.00, patience=5,verbose=False, mode='min')],
+                    # callbacks=[pl.callbacks.EarlyStopping(monitor='val_loss',min_delta=0.00, patience=5,verbose=False, mode='min')],
                     gpus=args["GPU"],
                     deterministic=True,
                     num_nodes=1,
                     #precision=16,
-                    accelerator="ddp"
+                    accelerator="ddp",
+                    num_sanity_val_steps = 0,
+                    # val_check_interval = 5000
                     )
 
     trainer.fit(task, train_loader, val_loader)
@@ -154,10 +187,9 @@ def evaluate_model(args, tokenizer, model, test_loader, save_path, ALL_SLOTS, pr
         dst_outputs = model.generate(input_ids=batch["encoder_input"].to(device),
                                 attention_mask=batch["attention_mask"].to(device),
                                 eos_token_id=tokenizer.eos_token_id,
-                                max_length=200,
                                 )
 
-        value_batch = tokenizer.batch_decode(dst_outputs, skip_special_tokens=True)
+        value_batch = tokenizer.batch_decode(dst_outputs, skip_special_tokens=False)
 
         for idx, value in enumerate(value_batch):
             dial_id = batch["ID"][idx]
@@ -166,10 +198,12 @@ def evaluate_model(args, tokenizer, model, test_loader, save_path, ALL_SLOTS, pr
                 predictions[dial_id]["domain"] = batch["domains"][idx][0]
                 predictions[dial_id]["turns"] = {}
             if batch["turn_id"][idx] not in predictions[dial_id]["turns"]:
-                predictions[dial_id]["turns"][batch["turn_id"][idx]] = {"turn_belief":batch["turn_belief"][idx], "pred_belief":[]}
+                predictions[dial_id]["turns"][batch["turn_id"][idx]] = {"turn_belief":batch["turn_belief"][idx], "pred_belief":[],"input_text":[],"output_text":[]}
 
             if value!="none":
-                predictions[dial_id]["turns"][batch["turn_id"][idx]]["pred_belief"].append(str(batch["slot_text"][idx])+'-'+str(value))
+                predictions[dial_id]["turns"][batch["turn_id"][idx]]["pred_belief"].append(str(value).replace("[UNK]","_").replace("[PAD]",""))
+                predictions[dial_id]["turns"][batch["turn_id"][idx]]["input_text"].append(batch["intput_text"][idx])
+                predictions[dial_id]["turns"][batch["turn_id"][idx]]["output_text"].append(batch["output_text"][idx])
 
             # analyze slot acc:
             if str(value)==str(batch["value_text"][idx]):
@@ -222,7 +256,7 @@ def fine_tune(args, *more):
                     accumulate_grad_batches=args["gradient_accumulation_steps"],
                     gradient_clip_val=args["max_norm"],
                     max_epochs=20,
-                    callbacks=[pl.callbacks.EarlyStopping(monitor='val_loss',min_delta=0.00, patience=8,verbose=False, mode='min')],
+                    # callbacks=[pl.callbacks.EarlyStopping(monitor='val_loss',min_delta=0.00, patience=8,verbose=False, mode='min')],
                     gpus=args["GPU"],
                     deterministic=True,
                     num_nodes=1,
